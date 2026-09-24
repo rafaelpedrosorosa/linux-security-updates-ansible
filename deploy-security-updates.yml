@@ -1,0 +1,136 @@
+---
+- name: Consultar ou aplicar atualizacoes de seguranca em sistemas RPM
+  hosts: "grp_linux:&{{ grupo_destino | default('grupo_nao_selecionado') }}"
+  become: true
+  become_method: sudo
+  gather_facts: false
+  serial: 1
+
+  vars:
+    grupos_permitidos:
+      - grp_centos
+      - grp_rocky
+      - grp_almalinux
+      - grp_linux
+
+  pre_tasks:
+
+    # ---------------------------------------------------------
+    # 1. Validacao dos parametros do Survey
+    # ---------------------------------------------------------
+
+    - name: Validar parametros da execucao
+      ansible.builtin.assert:
+        that:
+          - grupo_destino | default('') in grupos_permitidos
+          - acao_atualizacao | default('') in ['consultar', 'atualizar']
+          - confirmar_execucao | default('Não') == 'Sim'
+        fail_msg: >-
+          Parametros invalidos ou execucao nao autorizada.
+          Verifique grupo, operacao e confirmacao no Survey.
+        success_msg: "Parametros do Survey validados."
+
+    # ---------------------------------------------------------
+    # 2. Identificacao do sistema operacional
+    # ---------------------------------------------------------
+
+    - name: Coletar informacoes do sistema
+      ansible.builtin.setup:
+        gather_subset:
+          - min
+
+    - name: Validar distribuicao e versao suportadas
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == 'RedHat'
+          - ansible_facts.distribution in ['CentOS', 'Rocky', 'AlmaLinux']
+          - ansible_facts.distribution_major_version | int >= 7
+          - ansible_facts.distribution_major_version | int <= 9
+          - >-
+            (ansible_facts.distribution_major_version | int != 7)
+            or (ansible_facts.distribution == 'CentOS')
+        fail_msg: >-
+          Sistema nao habilitado nesta fase.
+          Somente CentOS 7 e Rocky/AlmaLinux 8 ou 9.
+
+    - name: Identificar gerenciador de pacotes
+      ansible.builtin.set_fact:
+        sistema_el7: >-
+          {{ ansible_facts.distribution_major_version | int == 7 }}
+
+    - name: Exibir parametros do host
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          - "Operacao: {{ acao_atualizacao }}"
+          - "Gerenciador: {{ 'YUM' if sistema_el7 | bool else 'DNF' }}"
+
+  tasks:
+
+    # ---------------------------------------------------------
+    # 3. CentOS 7 - YUM legado
+    # ---------------------------------------------------------
+
+    - name: Consultar atualizacoes de seguranca no EL7
+      ansible.builtin.raw: yum updateinfo list security
+      register: consulta_el7
+      changed_when: false
+      when: sistema_el7 | bool
+
+    - name: Exibir atualizacoes disponiveis no EL7
+      ansible.builtin.debug:
+        var: consulta_el7.stdout_lines
+      when: sistema_el7 | bool
+
+    - name: Aplicar atualizacoes de seguranca no EL7
+      ansible.builtin.raw: yum update --security -y
+      register: atualizacao_el7
+      changed_when: >-
+        'No packages marked for update' not in
+        (atualizacao_el7.stdout | default(''))
+      when:
+        - sistema_el7 | bool
+        - acao_atualizacao == 'atualizar'
+
+    # ---------------------------------------------------------
+    # 4. Rocky / AlmaLinux 8 e 9 - DNF
+    # ---------------------------------------------------------
+
+    - name: Consultar atualizacoes de seguranca via DNF
+      ansible.builtin.command:
+        cmd: dnf updateinfo list security
+      register: consulta_dnf
+      changed_when: false
+      when: not (sistema_el7 | bool)
+
+    - name: Exibir atualizacoes disponiveis via DNF
+      ansible.builtin.debug:
+        var: consulta_dnf.stdout_lines
+      when: not (sistema_el7 | bool)
+
+    - name: Aplicar atualizacoes de seguranca via DNF
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        security: true
+        update_only: true
+        update_cache: true
+        use_backend: dnf4
+      register: atualizacao_dnf
+      when:
+        - not (sistema_el7 | bool)
+        - acao_atualizacao == 'atualizar'
+
+    # ---------------------------------------------------------
+    # 5. Resumo da execucao
+    # ---------------------------------------------------------
+
+    - name: Exibir resultado da execucao
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Operacao: {{ acao_atualizacao }}"
+          - "Atualizacao EL7 executada: {{ atualizacao_el7 is changed }}"
+          - "Atualizacao DNF executada: {{ atualizacao_dnf is changed }}"
+          - "Reboot automatico: nao configurado"

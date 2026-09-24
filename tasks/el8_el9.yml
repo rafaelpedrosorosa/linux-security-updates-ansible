@@ -1,0 +1,49 @@
+---
+# ---------------------------------------------------------
+# 1. Consultar avisos de seguranca
+# ---------------------------------------------------------
+
+- name: Consultar avisos de seguranca via DNF
+  ansible.builtin.command:
+    cmd: dnf updateinfo list security
+  register: dnf_security_advisories
+  changed_when: false
+
+- name: Exibir avisos de seguranca
+  ansible.builtin.debug:
+    var: dnf_security_advisories.stdout_lines
+
+# ---------------------------------------------------------
+# 2. Simular atualizacao
+# ---------------------------------------------------------
+
+- name: Simular atualizacoes de seguranca via DNF
+  ansible.builtin.command:
+    cmd: dnf upgrade --security --assumeno
+  register: dnf_security_preview
+  changed_when: false
+  failed_when: dnf_security_preview.rc not in [0, 1]
+
+- name: Exibir pacotes candidatos a atualizacao
+  ansible.builtin.debug:
+    msg:
+      - "Host: {{ inventory_hostname }}"
+      - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+      - "Operacao: {{ acao_atualizacao }}"
+      - "Pacotes candidatos:"
+      - "{{ dnf_security_preview.stdout_lines }}"
+
+# ---------------------------------------------------------
+# 3. Aplicar atualizacoes somente quando autorizado
+# ---------------------------------------------------------
+
+- name: Aplicar atualizacoes de seguranca via DNF
+  ansible.builtin.dnf:
+    name: "*"
+    state: latest
+    security: true
+    update_only: true
+    update_cache: true
+    use_backend: dnf4
+  register: dnf_security_update
+  when: acao_atualizacao == 'atualizar'

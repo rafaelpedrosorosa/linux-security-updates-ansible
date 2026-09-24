@@ -1,3 +1,4 @@
+
 ---
 - name: Consultar ou aplicar atualizacoes de seguranca em sistemas RPM
   hosts: "grp_linux:&{{ grupo_destino | default('grupo_nao_selecionado') }}"
@@ -23,7 +24,7 @@
       ansible.builtin.assert:
         that:
           - grupo_destino | default('') in grupos_permitidos
-          - acao_atualizacao | default('') in ['consultar', 'atualizar']
+          - acao_atualizacao | default('') in ['validar', 'atualizar']
           - confirmar_execucao | default('Não') == 'Sim'
         fail_msg: >-
           Parametros invalidos ou execucao nao autorizada.
@@ -44,8 +45,7 @@
         that:
           - ansible_facts.os_family == 'RedHat'
           - ansible_facts.distribution in ['CentOS', 'Rocky', 'AlmaLinux']
-          - ansible_facts.distribution_major_version | int >= 7
-          - ansible_facts.distribution_major_version | int <= 9
+          - ansible_facts.distribution_major_version | int in [7, 8, 9]
           - >-
             (ansible_facts.distribution_major_version | int != 7)
             or (ansible_facts.distribution == 'CentOS')
@@ -72,15 +72,31 @@
     # 3. CentOS 7 - YUM legado
     # ---------------------------------------------------------
 
-    - name: Consultar atualizacoes de seguranca no EL7
+    - name: Consultar avisos de seguranca no EL7
       ansible.builtin.raw: yum updateinfo list security
       register: consulta_el7
       changed_when: false
       when: sistema_el7 | bool
 
-    - name: Exibir atualizacoes disponiveis no EL7
+    - name: Exibir avisos de seguranca no EL7
       ansible.builtin.debug:
         var: consulta_el7.stdout_lines
+      when: sistema_el7 | bool
+
+    - name: Simular atualizacoes de seguranca no EL7
+      ansible.builtin.raw: yum update --security --assumeno
+      register: previa_el7
+      changed_when: false
+      failed_when: previa_el7.rc not in [0, 1]
+      when: sistema_el7 | bool
+
+    - name: Exibir pacotes candidatos no EL7
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Operacao: {{ acao_atualizacao }}"
+          - "Previa da transacao:"
+          - "{{ previa_el7.stdout_lines }}"
       when: sistema_el7 | bool
 
     - name: Aplicar atualizacoes de seguranca no EL7
@@ -97,16 +113,33 @@
     # 4. Rocky / AlmaLinux 8 e 9 - DNF
     # ---------------------------------------------------------
 
-    - name: Consultar atualizacoes de seguranca via DNF
+    - name: Consultar avisos de seguranca via DNF
       ansible.builtin.command:
         cmd: dnf updateinfo list security
       register: consulta_dnf
       changed_when: false
       when: not (sistema_el7 | bool)
 
-    - name: Exibir atualizacoes disponiveis via DNF
+    - name: Exibir avisos de seguranca via DNF
       ansible.builtin.debug:
         var: consulta_dnf.stdout_lines
+      when: not (sistema_el7 | bool)
+
+    - name: Simular atualizacoes de seguranca via DNF
+      ansible.builtin.command:
+        cmd: dnf upgrade --security --assumeno
+      register: previa_dnf
+      changed_when: false
+      failed_when: previa_dnf.rc not in [0, 1]
+      when: not (sistema_el7 | bool)
+
+    - name: Exibir pacotes candidatos via DNF
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Operacao: {{ acao_atualizacao }}"
+          - "Previa da transacao:"
+          - "{{ previa_dnf.stdout_lines }}"
       when: not (sistema_el7 | bool)
 
     - name: Aplicar atualizacoes de seguranca via DNF
@@ -122,6 +155,8 @@
         - not (sistema_el7 | bool)
         - acao_atualizacao == 'atualizar'
 
+  post_tasks:
+
     # ---------------------------------------------------------
     # 5. Resumo da execucao
     # ---------------------------------------------------------
@@ -130,7 +165,8 @@
       ansible.builtin.debug:
         msg:
           - "Host: {{ inventory_hostname }}"
+          - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
           - "Operacao: {{ acao_atualizacao }}"
-          - "Atualizacao EL7 executada: {{ atualizacao_el7 is changed }}"
-          - "Atualizacao DNF executada: {{ atualizacao_dnf is changed }}"
+          - "Atualizacao EL7 executada: {{ atualizacao_el7 is defined and atualizacao_el7 is changed }}"
+          - "Atualizacao DNF executada: {{ atualizacao_dnf is defined and atualizacao_dnf is changed }}"
           - "Reboot automatico: nao configurado"

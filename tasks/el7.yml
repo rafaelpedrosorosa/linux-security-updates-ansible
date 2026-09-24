@@ -1,0 +1,44 @@
+---
+# ---------------------------------------------------------
+# 1. Consultar avisos de seguranca
+# ---------------------------------------------------------
+
+- name: Consultar avisos de seguranca no CentOS 7
+  ansible.builtin.raw: yum updateinfo list security
+  register: el7_security_advisories
+  changed_when: false
+
+- name: Exibir avisos de seguranca
+  ansible.builtin.debug:
+    var: el7_security_advisories.stdout_lines
+
+# ---------------------------------------------------------
+# 2. Simular atualizacao
+# ---------------------------------------------------------
+
+- name: Simular atualizacoes de seguranca no CentOS 7
+  ansible.builtin.raw: yum update --security --assumeno
+  register: el7_security_preview
+  changed_when: false
+  failed_when: el7_security_preview.rc not in [0, 1]
+
+- name: Exibir pacotes candidatos a atualizacao
+  ansible.builtin.debug:
+    msg:
+      - "Host: {{ inventory_hostname }}"
+      - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+      - "Operacao: {{ acao_atualizacao }}"
+      - "Pacotes candidatos:"
+      - "{{ el7_security_preview.stdout_lines }}"
+
+# ---------------------------------------------------------
+# 3. Aplicar atualizacoes somente quando autorizado
+# ---------------------------------------------------------
+
+- name: Aplicar atualizacoes de seguranca no CentOS 7
+  ansible.builtin.raw: yum update --security -y
+  register: el7_security_update
+  changed_when: >-
+    'No packages marked for update' not in
+    (el7_security_update.stdout | default(''))
+  when: acao_atualizacao == 'atualizar'

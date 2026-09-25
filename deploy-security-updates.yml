@@ -14,6 +14,9 @@
       - grp_almalinux
       - grp_linux
 
+    reboot_marker_dir: /var/lib/ansible-security-update
+    reboot_marker_file: "{{ reboot_marker_dir }}/reboot-state.json"
+
   pre_tasks:
 
     # ---------------------------------------------------------
@@ -66,10 +69,95 @@
           - "Operacao: {{ acao_atualizacao }}"
           - "Gerenciador: {{ 'YUM' if sistema_el7 | bool else 'DNF' }}"
 
+    # ---------------------------------------------------------
+    # 3. Validacao das ferramentas de reboot
+    # ---------------------------------------------------------
+
+    - name: Verificar ferramenta needs-restarting no EL7
+      ansible.builtin.command:
+        cmd: which needs-restarting
+      register: ferramenta_reboot_el7
+      changed_when: false
+      failed_when: false
+      when: sistema_el7 | bool
+
+    - name: Validar ferramenta needs-restarting no EL7
+      ansible.builtin.assert:
+        that:
+          - ferramenta_reboot_el7.rc == 0
+        fail_msg: >-
+          Ferramenta needs-restarting nao encontrada.
+          Verifique a disponibilidade do pacote yum-utils.
+      when: sistema_el7 | bool
+
+    - name: Verificar ferramenta grubby
+      ansible.builtin.command:
+        cmd: which grubby
+      register: ferramenta_grubby
+      changed_when: false
+      failed_when: false
+
+    - name: Validar ferramenta grubby
+      ansible.builtin.assert:
+        that:
+          - ferramenta_grubby.rc == 0
+        fail_msg: >-
+          Ferramenta grubby nao encontrada.
+          Verifique sua instalacao antes de continuar.
+
+    # ---------------------------------------------------------
+    # 4. Identificacao do boot atual
+    # ---------------------------------------------------------
+
+    - name: Consultar identificador do boot
+      ansible.builtin.command:
+        cmd: cat /proc/sys/kernel/random/boot_id
+      register: boot_id_atual
+      changed_when: false
+
+    - name: Consultar kernel em execucao
+      ansible.builtin.command:
+        cmd: uname -r
+      register: kernel_inicial
+      changed_when: false
+
+    # ---------------------------------------------------------
+    # 5. Recuperar controle anterior de reboot
+    # ---------------------------------------------------------
+
+    - name: Verificar arquivo de controle de reboot
+      ansible.builtin.stat:
+        path: "{{ reboot_marker_file }}"
+      register: reboot_marker_stat
+
+    - name: Ler controle anterior
+      ansible.builtin.slurp:
+        src: "{{ reboot_marker_file }}"
+      register: reboot_marker_raw
+      when: reboot_marker_stat.stat.exists
+
+    - name: Carregar estado anterior
+      ansible.builtin.set_fact:
+        reboot_anterior: >-
+          {{
+            (reboot_marker_raw.content | b64decode | from_json)
+            if reboot_marker_stat.stat.exists
+            else {}
+          }}
+
+    - name: Identificar reinicializacao desde o registro anterior
+      ansible.builtin.set_fact:
+        reboot_detectado: >-
+          {{
+            reboot_anterior.status | default('') == 'pending'
+            and
+            reboot_anterior.boot_id | default('') != boot_id_atual.stdout
+          }}
+
   tasks:
 
     # ---------------------------------------------------------
-    # 3. CentOS 7 - YUM legado
+    # 6. CentOS 7 - YUM legado
     # ---------------------------------------------------------
 
     - name: Consultar avisos de seguranca no EL7
@@ -110,7 +198,7 @@
         - acao_atualizacao == 'atualizar'
 
     # ---------------------------------------------------------
-    # 4. Rocky / AlmaLinux 8 e 9 - DNF
+    # 7. Rocky / AlmaLinux 8 e 9 - DNF
     # ---------------------------------------------------------
 
     - name: Consultar avisos de seguranca via DNF
@@ -158,15 +246,187 @@
   post_tasks:
 
     # ---------------------------------------------------------
-    # 5. Resumo da execucao
+    # 8. Verificar necessidade de reboot - EL7
+    # ---------------------------------------------------------
+
+    - name: Verificar necessidade de reboot no EL7
+      ansible.builtin.command:
+        cmd: needs-restarting -r
+      register: reboot_check_el7
+      changed_when: false
+      failed_when: reboot_check_el7.rc not in [0, 1]
+      when: sistema_el7 | bool
+
+    # ---------------------------------------------------------
+    # 9. Verificar necessidade de reboot - DNF
+    # ---------------------------------------------------------
+
+    - name: Verificar necessidade de reboot via DNF
+      ansible.builtin.command:
+        cmd: dnf needs-restarting -r
+      register: reboot_check_dnf
+      changed_when: false
+      failed_when: reboot_check_dnf.rc not in [0, 1]
+      when: not (sistema_el7 | bool)
+
+    # ---------------------------------------------------------
+    # 10. Consultar kernel apos operacao
+    # ---------------------------------------------------------
+
+    - name: Consultar kernel em execucao
+      ansible.builtin.command:
+        cmd: uname -r
+      register: kernel_final
+      changed_when: false
+
+    - name: Consultar kernel padrao de boot
+      ansible.builtin.command:
+        cmd: grubby --default-kernel
+      register: kernel_default
+      changed_when: false
+
+    - name: Extrair versao do kernel padrao
+      ansible.builtin.set_fact:
+        kernel_default_version: >-
+          {{
+            kernel_default.stdout
+            | basename
+            | regex_replace('^vmlinuz-', '')
+          }}
+
+    # ---------------------------------------------------------
+    # 11. Consolidar necessidade de reboot
+    # ---------------------------------------------------------
+
+    - name: Definir resultado do needs-restarting
+      ansible.builtin.set_fact:
+        reboot_rc: >-
+          {{
+            reboot_check_el7.rc
+            if sistema_el7 | bool
+            else reboot_check_dnf.rc
+          }}
+
+    - name: Definir necessidade final de reboot
+      ansible.builtin.set_fact:
+        reboot_required: >-
+          {{
+            reboot_rc | int == 1
+            or
+            kernel_final.stdout != kernel_default_version
+          }}
+
+    # ---------------------------------------------------------
+    # 12. Identificar resultado da reinicializacao
+    # ---------------------------------------------------------
+
+    - name: Definir status do reboot
+      ansible.builtin.set_fact:
+        reboot_status: >-
+          {% if reboot_detectado | bool and not (reboot_required | bool) %}
+          REBOOT REALIZADO E VALIDADO
+          {% elif reboot_detectado | bool and reboot_required | bool %}
+          REBOOT REALIZADO, MAS AINDA NECESSARIO
+          {% elif reboot_required | bool %}
+          REBOOT PENDENTE
+          {% elif reboot_anterior.status | default('') == 'completed' %}
+          REBOOT ANTERIOR JA VALIDADO
+          {% elif reboot_anterior.status | default('') == 'pending' %}
+          PENDENCIA RESOLVIDA SEM REBOOT DETECTADO
+          {% else %}
+          REBOOT NAO NECESSARIO
+          {% endif %}
+
+    # ---------------------------------------------------------
+    # 13. Persistir estado de reboot
+    # ---------------------------------------------------------
+
+    - name: Criar diretorio de controle
+      ansible.builtin.file:
+        path: "{{ reboot_marker_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      when:
+        - reboot_required | bool or reboot_marker_stat.stat.exists
+
+    - name: Registrar estado atual de reboot
+      ansible.builtin.copy:
+        dest: "{{ reboot_marker_file }}"
+        owner: root
+        group: root
+        mode: '0600'
+        content: |
+          {{
+            {
+              'status': 'pending' if reboot_required | bool else 'completed',
+              'boot_id': (
+                boot_id_atual.stdout
+                if reboot_required | bool
+                else reboot_anterior.boot_id | default(boot_id_atual.stdout)
+              ),
+              'kernel_origem': (
+                kernel_final.stdout
+                if reboot_required | bool
+                else reboot_anterior.kernel_origem | default(kernel_final.stdout)
+              ),
+              'kernel_destino': (
+                kernel_default_version
+                if reboot_required | bool
+                else reboot_anterior.kernel_destino | default(kernel_default_version)
+              ),
+              'boot_id_validado': (
+                boot_id_atual.stdout
+                if reboot_detectado | bool and not (reboot_required | bool)
+                else reboot_anterior.boot_id_validado | default('')
+              ),
+              'reboot_confirmado': (
+                reboot_detectado | bool
+                if not (reboot_required | bool)
+                else false
+              )
+            } | to_nice_json
+          }}
+      when:
+        - >-
+          reboot_required | bool
+          or reboot_marker_stat.stat.exists
+        - >-
+          not reboot_marker_stat.stat.exists
+          or reboot_detectado | bool
+          or (
+            reboot_required | bool
+            and reboot_anterior.status | default('') != 'pending'
+          )
+          or (
+            reboot_required | bool
+            and reboot_anterior.kernel_destino | default('') != kernel_default_version
+          )
+          or (
+            not (reboot_required | bool)
+            and reboot_anterior.status | default('') == 'pending'
+          )
+
+    # ---------------------------------------------------------
+    # 14. Resumo final
     # ---------------------------------------------------------
 
     - name: Exibir resultado da execucao
       ansible.builtin.debug:
         msg:
+          - "=========================================="
+          - "RESUMO DE ATUALIZACAO DE SEGURANCA"
+          - "=========================================="
           - "Host: {{ inventory_hostname }}"
           - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
           - "Operacao: {{ acao_atualizacao }}"
-          - "Atualizacao EL7 executada: {{ atualizacao_el7 is defined and atualizacao_el7 is changed }}"
-          - "Atualizacao DNF executada: {{ atualizacao_dnf is defined and atualizacao_dnf is changed }}"
-          - "Reboot automatico: nao configurado"
+          - "Atualizacao EL7 executada: {{ atualizacao_el7.changed | default(false) }}"
+          - "Atualizacao DNF executada: {{ atualizacao_dnf.changed | default(false) }}"
+          - "Kernel em execucao: {{ kernel_final.stdout }}"
+          - "Kernel padrao de boot: {{ kernel_default_version }}"
+          - "Reboot necessario: {{ 'SIM' if reboot_required | bool else 'NAO' }}"
+          - "Reboot detectado desde o registro: {{ 'SIM' if reboot_detectado | bool else 'NAO' }}"
+          - "Status: {{ reboot_status | trim }}"
+          - "Reboot automatico: NAO CONFIGURADO"
+          - "=========================================="

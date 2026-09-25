@@ -1,9 +1,10 @@
+
 ---
-- name: Consultar ou aplicar atualizacoes de seguranca em sistemas RPM
+- name: Validar ou aplicar atualizacoes de seguranca em sistemas RPM
   hosts: "grp_linux:&{{ grupo_destino | default('grupo_nao_selecionado') }}"
   become: true
   become_method: sudo
-  gather_facts: false
+  gather_facts: true
   serial: 1
 
   vars:
@@ -12,338 +13,240 @@
       - grp_rocky
       - grp_almalinux
       - grp_linux
-    reboot_marker_dir: /var/lib/ansible-security-update
-    reboot_marker_file: "{{ reboot_marker_dir }}/reboot-state.json"
+
+    acoes_permitidas:
+      - validar
+      - atualizar
+
+    reboot_required: false
 
   pre_tasks:
-    - name: Validar parametros do Survey
+
+    # ---------------------------------------------------------
+    # 1. Validacao dos parametros recebidos pelo AWX Survey
+    # ---------------------------------------------------------
+
+    - name: Validar parametros da execucao
       ansible.builtin.assert:
         that:
           - grupo_destino | default('') in grupos_permitidos
-          - acao_atualizacao | default('') in ['validar', 'atualizar']
+          - acao_atualizacao | default('') in acoes_permitidas
           - confirmar_execucao | default('Não') == 'Sim'
-        fail_msg: Parametros invalidos ou execucao nao autorizada. Verifique grupo, operacao e confirmacao no Survey.
-        success_msg: Parametros do Survey validados.
+        fail_msg: >-
+          Parametros invalidos. Verifique grupo_destino,
+          acao_atualizacao e confirmar_execucao.
+        success_msg: "Parametros validados com sucesso."
+      run_once: true
 
-    - name: Coletar informacoes do sistema
-      ansible.builtin.setup:
-        gather_subset:
-          - min
+    # ---------------------------------------------------------
+    # 2. Validacao do sistema operacional
+    # ---------------------------------------------------------
 
-    - name: Validar distribuicao e versao suportadas
+    - name: Validar familia e versao do sistema operacional
       ansible.builtin.assert:
         that:
-          - ansible_facts.os_family == 'RedHat'
+          - ansible_facts['os_family'] == 'RedHat'
           - >-
-            (ansible_facts.distribution == 'CentOS' and
-             ansible_facts.distribution_major_version | int == 7)
+            (ansible_facts['distribution'] == 'CentOS'
+             and ansible_facts['distribution_major_version'] == '7')
             or
-            (ansible_facts.distribution in ['Rocky', 'AlmaLinux'] and
-             ansible_facts.distribution_major_version | int in [8, 9])
-        fail_msg: Somente CentOS 7 e Rocky/AlmaLinux 8 ou 9 sao suportados.
+            (ansible_facts['distribution'] in ['Rocky', 'AlmaLinux']
+             and ansible_facts['distribution_major_version'] in ['8', '9'])
+        fail_msg: >-
+          Sistema operacional nao homologado para este playbook.
+          Suportados nesta etapa: CentOS 7, Rocky 8/9 e
+          AlmaLinux 8/9.
 
     - name: Identificar gerenciador de pacotes
       ansible.builtin.set_fact:
-        sistema_el7: "{{ ansible_facts.distribution_major_version | int == 7 }}"
+        gerenciador_pacotes: >-
+          {{ 'yum' if ansible_facts['distribution_major_version'] == '7'
+             else 'dnf' }}
 
-    - name: Exibir parametros do host
+    # ---------------------------------------------------------
+    # 3. Identificacao do ambiente
+    # ---------------------------------------------------------
+
+    - name: Exibir identificacao do servidor
       ansible.builtin.debug:
         msg:
-          - "Host: {{ inventory_hostname }}"
-          - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
-          - "Operacao: {{ acao_atualizacao }}"
-          - "Gerenciador: {{ 'YUM' if sistema_el7 | bool else 'DNF' }}"
-
-    # A instalacao de dependencias e a persistencia do marcador sao as
-    # unicas alteracoes locais permitidas no modo validar.
-    - name: Verificar needs-restarting no CentOS 7
-      ansible.builtin.command:
-        cmd: which needs-restarting
-      register: ferramenta_reboot_el7
-      changed_when: false
-      failed_when: false
-      when: sistema_el7 | bool
-
-    - name: Instalar yum-utils no CentOS 7 quando necessario
-      ansible.builtin.yum:
-        name: yum-utils
-        state: present
-      register: instalacao_yum_utils
-      when:
-        - sistema_el7 | bool
-        - ferramenta_reboot_el7.rc != 0
-
-    - name: Verificar plugin needs-restarting no DNF
-      ansible.builtin.command:
-        cmd: dnf needs-restarting --help
-      register: ferramenta_reboot_dnf
-      changed_when: false
-      failed_when: false
-      when: not (sistema_el7 | bool)
-
-    - name: Instalar dnf-plugins-core quando necessario
-      ansible.builtin.dnf:
-        name: dnf-plugins-core
-        state: present
-        use_backend: dnf4
-      register: instalacao_dnf_plugins
-      when:
-        - not (sistema_el7 | bool)
-        - ferramenta_reboot_dnf.rc != 0
-
-    - name: Verificar ferramenta grubby
-      ansible.builtin.command:
-        cmd: which grubby
-      register: ferramenta_grubby
-      changed_when: false
-      failed_when: false
-
-    - name: Instalar grubby quando necessario
-      ansible.builtin.package:
-        name: grubby
-        state: present
-      register: instalacao_grubby
-      when: ferramenta_grubby.rc != 0
-
-    - name: Confirmar needs-restarting no CentOS 7
-      ansible.builtin.command:
-        cmd: which needs-restarting
-      changed_when: false
-      when: sistema_el7 | bool
-
-    - name: Confirmar plugin needs-restarting no DNF
-      ansible.builtin.command:
-        cmd: dnf needs-restarting --help
-      changed_when: false
-      when: not (sistema_el7 | bool)
-
-    - name: Confirmar grubby
-      ansible.builtin.command:
-        cmd: which grubby
-      changed_when: false
-
-    - name: Consultar identificador do boot atual
-      ansible.builtin.command:
-        cmd: cat /proc/sys/kernel/random/boot_id
-      register: boot_id_atual
-      changed_when: false
-
-    - name: Verificar marcador de reboot anterior
-      ansible.builtin.stat:
-        path: "{{ reboot_marker_file }}"
-      register: reboot_marker_stat
-
-    - name: Ler marcador de reboot anterior
-      ansible.builtin.slurp:
-        src: "{{ reboot_marker_file }}"
-      register: reboot_marker_raw
-      when: reboot_marker_stat.stat.exists
-
-    - name: Interpretar marcador anterior
-      ansible.builtin.set_fact:
-        reboot_anterior: >-
-          {{ (reboot_marker_raw.content | b64decode | from_json)
-             if reboot_marker_stat.stat.exists else {} }}
-
-    - name: Identificar reboot desde o registro pendente
-      ansible.builtin.set_fact:
-        reboot_detectado: >-
-          {{ reboot_anterior.status | default('') == 'pending'
-             and reboot_anterior.boot_id | default('') != boot_id_atual.stdout }}
+          - "Servidor: {{ inventory_hostname }}"
+          - "Sistema: {{ ansible_facts['distribution'] }}"
+          - "Versao: {{ ansible_facts['distribution_version'] }}"
+          - "Gerenciador: {{ gerenciador_pacotes }}"
+          - "Grupo selecionado: {{ grupo_destino }}"
+          - "Acao solicitada: {{ acao_atualizacao }}"
+          - "Reboot automatico: DESABILITADO"
 
   tasks:
-    - name: Consultar avisos de seguranca no EL7
-      ansible.builtin.raw: yum updateinfo list security
-      register: consulta_el7
-      changed_when: false
-      when: sistema_el7 | bool
 
-    - name: Exibir avisos de seguranca no EL7
-      ansible.builtin.debug:
-        var: consulta_el7.stdout_lines
-      when: sistema_el7 | bool
+    # =========================================================
+    # ETAPA 1 - CONSULTA DOS ADVISORIES DE SEGURANCA
+    # =========================================================
 
-    - name: Simular atualizacoes de seguranca no EL7
-      ansible.builtin.raw: yum update --security --assumeno
-      register: previa_el7
-      changed_when: false
-      failed_when: previa_el7.rc not in [0, 1]
-      when: sistema_el7 | bool
-
-    - name: Exibir previa no EL7
-      ansible.builtin.debug:
-        msg:
-          - "Host: {{ inventory_hostname }}"
-          - "Operacao: {{ acao_atualizacao }}"
-          - "Previa da transacao:"
-          - "{{ previa_el7.stdout_lines }}"
-      when: sistema_el7 | bool
-
-    - name: Aplicar atualizacoes de seguranca no EL7
-      ansible.builtin.raw: yum update --security -y
-      register: atualizacao_el7
-      changed_when: >-
-        'No packages marked for update' not in
-        (atualizacao_el7.stdout | default(''))
-      when:
-        - sistema_el7 | bool
-        - acao_atualizacao == 'atualizar'
-
-    - name: Consultar avisos de seguranca via DNF
+    - name: Consultar advisories de seguranca disponiveis
       ansible.builtin.command:
-        cmd: dnf updateinfo list security
-      register: consulta_dnf
+        argv:
+          - "{{ gerenciador_pacotes }}"
+          - updateinfo
+          - list
+          - updates
+          - security
+      register: security_advisories
       changed_when: false
-      when: not (sistema_el7 | bool)
+      failed_when: security_advisories.rc not in [0, 100]
 
-    - name: Exibir avisos de seguranca via DNF
+    - name: Exibir advisories encontrados
       ansible.builtin.debug:
-        var: consulta_dnf.stdout_lines
-      when: not (sistema_el7 | bool)
+        msg: >-
+          {{ security_advisories.stdout
+             | default('Nenhum advisory retornado.', true) }}
 
-    - name: Simular atualizacoes de seguranca via DNF
+    # =========================================================
+    # ETAPA 2 - PREVIA DAS ATUALIZACOES
+    # =========================================================
+
+    - name: Simular atualizacoes de seguranca
       ansible.builtin.command:
-        cmd: dnf upgrade --security --assumeno
-      register: previa_dnf
+        argv:
+          - "{{ gerenciador_pacotes }}"
+          - update
+          - --security
+          - --assumeno
+      register: security_preview
       changed_when: false
-      failed_when: previa_dnf.rc not in [0, 1]
-      when: not (sistema_el7 | bool)
+      failed_when: security_preview.rc not in [0, 1]
 
-    - name: Exibir previa via DNF
+    - name: Exibir previa das atualizacoes
+      ansible.builtin.debug:
+        msg: "{{ security_preview.stdout_lines }}"
+
+    # =========================================================
+    # ETAPA 3 - VALIDACAO DA ACAO SOLICITADA
+    # =========================================================
+
+    - name: Encerrar modo de validacao
       ansible.builtin.debug:
         msg:
-          - "Host: {{ inventory_hostname }}"
-          - "Operacao: {{ acao_atualizacao }}"
-          - "Previa da transacao:"
-          - "{{ previa_dnf.stdout_lines }}"
-      when: not (sistema_el7 | bool)
+          - "Servidor: {{ inventory_hostname }}"
+          - "Modo: VALIDAR"
+          - "Consulta de seguranca concluida."
+          - "Nenhuma atualizacao foi aplicada."
+          - "Nenhuma reinicializacao foi executada."
+      when: acao_atualizacao == 'validar'
 
-    - name: Aplicar atualizacoes de seguranca via DNF
-      ansible.builtin.dnf:
-        name: '*'
-        state: latest
-        security: true
-        update_only: true
-        update_cache: true
-        use_backend: dnf4
-      register: atualizacao_dnf
-      when:
-        - not (sistema_el7 | bool)
-        - acao_atualizacao == 'atualizar'
+    # =========================================================
+    # ETAPA 4 - APLICACAO DAS ATUALIZACOES
+    # =========================================================
 
-  post_tasks:
-    - name: Verificar necessidade de reboot no EL7
-      ansible.builtin.command:
-        cmd: needs-restarting -r
-      register: reboot_check_el7
-      changed_when: false
-      failed_when: reboot_check_el7.rc not in [0, 1]
-      when: sistema_el7 | bool
+    - name: Aplicar atualizacoes de seguranca
+      when: acao_atualizacao == 'atualizar'
+      block:
 
-    - name: Verificar necessidade de reboot via DNF
-      ansible.builtin.command:
-        cmd: dnf needs-restarting -r
-      register: reboot_check_dnf
-      changed_when: false
-      failed_when: reboot_check_dnf.rc not in [0, 1]
-      when: not (sistema_el7 | bool)
+        - name: Atualizar pacotes de seguranca - Rocky e AlmaLinux
+          ansible.builtin.dnf:
+            name: "*"
+            state: latest
+            security: true
+            update_only: true
+            lock_timeout: 300
+          register: security_update_dnf
+          when: gerenciador_pacotes == 'dnf'
 
-    - name: Consultar kernel em execucao
-      ansible.builtin.command:
-        cmd: uname -r
-      register: kernel_final
-      changed_when: false
+        - name: Atualizar pacotes de seguranca - CentOS 7
+          ansible.builtin.command:
+            argv:
+              - yum
+              - update
+              - --security
+              - -y
+          register: security_update_yum
+          changed_when: >-
+            'No packages marked for update'
+            not in security_update_yum.stdout
+          when: gerenciador_pacotes == 'yum'
 
-    - name: Consultar kernel padrao de boot
-      ansible.builtin.command:
-        cmd: grubby --default-kernel
-      register: kernel_default
-      changed_when: false
+        # -----------------------------------------------------
+        # 5. Validacao apos a atualizacao
+        # -----------------------------------------------------
 
-    - name: Extrair versao do kernel padrao
-      ansible.builtin.set_fact:
-        kernel_default_version: >-
-          {{ kernel_default.stdout | basename | regex_replace('^vmlinuz-', '') }}
+        - name: Consultar advisories remanescentes
+          ansible.builtin.command:
+            argv:
+              - "{{ gerenciador_pacotes }}"
+              - updateinfo
+              - list
+              - updates
+              - security
+          register: security_remaining
+          changed_when: false
+          failed_when: security_remaining.rc not in [0, 100]
 
-    - name: Consolidar necessidade de reboot
-      ansible.builtin.set_fact:
-        reboot_rc: >-
-          {{ reboot_check_el7.rc if sistema_el7 | bool else reboot_check_dnf.rc }}
-        reboot_required: >-
-          {{ (reboot_check_el7.rc if sistema_el7 | bool else reboot_check_dnf.rc) | int == 1
-             or kernel_final.stdout != kernel_default_version }}
+        - name: Exibir resultado da consulta posterior
+          ansible.builtin.debug:
+            msg: >-
+              {{ security_remaining.stdout
+                 | default('Nenhum advisory remanescente.', true) }}
 
-    - name: Definir estado final da reinicializacao
-      ansible.builtin.set_fact:
-        reboot_status: >-
-          {% if reboot_required | bool %}
-          pending
-          {% elif reboot_detectado | bool %}
-          completed
-          {% elif reboot_anterior.status | default('') == 'pending' %}
-          resolved_without_reboot
-          {% elif reboot_anterior.status | default('') == 'completed' %}
-          completed
-          {% elif reboot_anterior.status | default('') == 'resolved_without_reboot' %}
-          resolved_without_reboot
-          {% else %}
-          not_required
-          {% endif %}
+        # -----------------------------------------------------
+        # 6. Verificacao da necessidade de reinicializacao
+        # -----------------------------------------------------
 
-    - name: Criar diretorio de controle de reboot
-      ansible.builtin.file:
-        path: "{{ reboot_marker_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: '0700'
-      when: reboot_required | bool or reboot_marker_stat.stat.exists
+        - name: Consultar kernel atualmente em execucao
+          ansible.builtin.command:
+            argv:
+              - uname
+              - -r
+          register: kernel_running
+          changed_when: false
 
-    # Um boot_id pendente nunca e sobrescrito enquanto a mesma pendencia
-    # continua. Assim a proxima execucao consegue detectar o reboot.
-    - name: Registrar estado persistente de reboot
-      ansible.builtin.copy:
-        dest: "{{ reboot_marker_file }}"
-        owner: root
-        group: root
-        mode: '0600'
-        content: |
-          {{ {
-            'status': reboot_status | trim,
-            'boot_id': (boot_id_atual.stdout if reboot_required | bool and
-              (reboot_anterior.status | default('') != 'pending' or reboot_detectado | bool)
-              else reboot_anterior.boot_id | default(boot_id_atual.stdout)),
-            'kernel_origem': (kernel_final.stdout if reboot_required | bool and
-              (reboot_anterior.status | default('') != 'pending' or reboot_detectado | bool)
-              else reboot_anterior.kernel_origem | default(kernel_final.stdout)),
-            'kernel_destino': (kernel_default_version if reboot_required | bool
-              else reboot_anterior.kernel_destino | default(kernel_default_version)),
-            'boot_id_validado': (boot_id_atual.stdout if reboot_detectado | bool
-              and not (reboot_required | bool)
-              else reboot_anterior.boot_id_validado | default('')),
-            'reboot_confirmado': ((reboot_detectado | bool and not (reboot_required | bool))
-              or (reboot_anterior.reboot_confirmado | default(false) | bool
-                  and not (reboot_required | bool)))
-          } | to_nice_json }}
-      when: reboot_required | bool or reboot_marker_stat.stat.exists
+        - name: Consultar kernel configurado como padrao
+          ansible.builtin.command:
+            argv:
+              - grubby
+              - --default-kernel
+          register: kernel_default
+          changed_when: false
 
-    - name: Exibir resultado da execucao
-      ansible.builtin.debug:
-        msg:
-          - '=========================================='
-          - 'RESUMO DE ATUALIZACAO DE SEGURANCA'
-          - '=========================================='
-          - "Host: {{ inventory_hostname }}"
-          - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
-          - "Operacao: {{ acao_atualizacao }}"
-          - "Atualizacao EL7 aplicada: {{ atualizacao_el7.changed | default(false) }}"
-          - "Atualizacao DNF aplicada: {{ atualizacao_dnf.changed | default(false) }}"
-          - "Dependencias instaladas: {{ (instalacao_yum_utils.changed | default(false)) or (instalacao_dnf_plugins.changed | default(false)) or (instalacao_grubby.changed | default(false)) }}"
-          - "Kernel em execucao: {{ kernel_final.stdout }}"
-          - "Kernel padrao de boot: {{ kernel_default_version }}"
-          - "Reboot necessario: {{ 'SIM' if reboot_required | bool else 'NAO' }}"
-          - "Reboot detectado nesta execucao: {{ 'SIM' if reboot_detectado | bool else 'NAO' }}"
-          - "Reboot confirmado anteriormente: {{ 'SIM' if (reboot_anterior.reboot_confirmado | default(false) | bool) else 'NAO' }}"
-          - "Status: {{ reboot_status | trim }}"
-          - 'Reboot automatico: NAO CONFIGURADO'
-          - '=========================================='
+        - name: Verificar necessidade de reinicializacao
+          ansible.builtin.command:
+            argv:
+              - needs-restarting
+              - -r
+          register: reboot_check
+          changed_when: false
+          failed_when: reboot_check.rc not in [0, 1]
+
+        - name: Determinar necessidade de reinicializacao
+          ansible.builtin.set_fact:
+            reboot_required: >-
+              {{
+                reboot_check.rc == 1
+                or
+                kernel_running.stdout !=
+                (
+                  kernel_default.stdout
+                  | basename
+                  | regex_replace('^vmlinuz-', '')
+                )
+              }}
+
+        # -----------------------------------------------------
+        # 7. Relatorio final do servidor
+        # -----------------------------------------------------
+
+        - name: Exibir relatorio final
+          ansible.builtin.debug:
+            msg:
+              - "========================================"
+              - "RELATORIO DE ATUALIZACAO DE SEGURANCA"
+              - "========================================"
+              - "Servidor: {{ inventory_hostname }}"
+              - "Sistema: {{ ansible_facts['distribution'] }}"
+              - "Versao: {{ ansible_facts['distribution_version'] }}"
+              - "Acao executada: {{ acao_atualizacao }}"
+              - "Kernel em execucao: {{ kernel_running.stdout }}"
+              - "Kernel padrao: {{ kernel_default.stdout }}"
+              - "Reinicializacao necessaria: {{ 'SIM' if reboot_required | bool else 'NAO' }}"
+              - "Reinicializacao automatica: DESABILITADA"
+              - "========================================"

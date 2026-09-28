@@ -1,0 +1,47 @@
+---
+- name: Validar ou aplicar atualizacoes de seguranca em Linux
+  hosts: "grp_linux:&{{ grupo_destino | default('grupo_nao_selecionado') }}"
+  become: true
+  become_method: sudo
+  gather_facts: true
+  serial: 1
+
+  vars:
+    grupos_permitidos:
+      - grp_centos
+      - grp_rocky
+      - grp_almalinux
+      - grp_debian
+      - grp_ubuntu
+      - grp_linux
+
+    acoes_permitidas:
+      - validar
+      - atualizar
+
+  pre_tasks:
+    - name: Validar parametros da execucao
+      ansible.builtin.assert:
+        that:
+          - grupo_destino | default('') in grupos_permitidos
+          - acao_atualizacao | default('') in acoes_permitidas
+          - confirmar_execucao | default('Não') == 'Sim'
+        fail_msg: >-
+          Parametros invalidos. Verifique grupo_destino,
+          acao_atualizacao e confirmar_execucao.
+        success_msg: "Parametros validados com sucesso."
+      run_once: true
+
+    - name: Exibir identificacao do servidor
+      ansible.builtin.debug:
+        msg:
+          - "Servidor: {{ inventory_hostname }}"
+          - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          - "Familia: {{ ansible_facts.os_family }}"
+          - "Grupo selecionado: {{ grupo_destino }}"
+          - "Acao solicitada: {{ acao_atualizacao }}"
+          - "Reboot automatico: DESABILITADO"
+
+  tasks:
+    - name: Executar fluxo de atualizacoes por familia Linux
+      ansible.builtin.include_tasks: tasks/main.yml

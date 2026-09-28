@@ -1,0 +1,88 @@
+---
+# Debian/Ubuntu: primeiro consultar; atualizar somente com acao=atualizar.
+
+- name: Atualizar indices APT sem instalar pacotes
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  changed_when: false
+
+- name: Consultar pacotes com atualizacao disponivel
+  ansible.builtin.command:
+    argv:
+      - apt
+      - list
+      - --upgradable
+  register: apt_upgradable
+  changed_when: false
+  failed_when: apt_upgradable.rc not in [0, 100]
+
+- name: Simular upgrade sem alterar o sistema
+  ansible.builtin.command:
+    argv:
+      - apt-get
+      - -s
+      - upgrade
+  register: apt_simulation
+  changed_when: false
+
+- name: Contar pacotes atualizaveis
+  ansible.builtin.set_fact:
+    apt_upgradable_count: >-
+      {{
+        apt_upgradable.stdout_lines
+        | default([])
+        | reject('match', '^Listing')
+        | reject('equalto', '')
+        | list
+        | length
+      }}
+
+- name: Exibir resumo das atualizacoes disponiveis
+  ansible.builtin.debug:
+    msg:
+      - "Servidor: {{ inventory_hostname }}"
+      - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+      - "Pacotes atualizaveis: {{ apt_upgradable_count }}"
+      - "Modo: {{ acao_atualizacao | upper }}"
+      - "Nenhum pacote foi instalado nesta etapa."
+
+- name: Exibir pacotes atualizaveis
+  ansible.builtin.debug:
+    var: apt_upgradable.stdout_lines
+
+- name: Exibir simulacao do upgrade
+  ansible.builtin.debug:
+    var: apt_simulation.stdout_lines
+
+- name: Encerrar modo de validacao sem aplicar alteracoes
+  ansible.builtin.debug:
+    msg:
+      - "Consulta concluida."
+      - "Foram encontrados {{ apt_upgradable_count }} pacote(s) atualizavel(is)."
+      - "Nenhuma atualizacao foi aplicada."
+      - "Nenhuma reinicializacao foi executada."
+  when: acao_atualizacao == 'validar'
+
+- name: Aplicar atualizacoes APT
+  ansible.builtin.apt:
+    upgrade: safe
+    update_cache: true
+    cache_valid_time: 3600
+  register: apt_upgrade_result
+  when: acao_atualizacao == 'atualizar'
+
+- name: Verificar necessidade de reboot
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: apt_reboot_required
+  when: acao_atualizacao == 'atualizar'
+
+- name: Exibir relatorio final apos atualizacao
+  ansible.builtin.debug:
+    msg:
+      - "Servidor: {{ inventory_hostname }}"
+      - "Atualizacao executada: SIM"
+      - "Reboot necessario: {{ 'SIM' if apt_reboot_required.stat.exists | default(false) else 'NAO' }}"
+      - "Reboot automatico: DESABILITADO"
+  when: acao_atualizacao == 'atualizar'

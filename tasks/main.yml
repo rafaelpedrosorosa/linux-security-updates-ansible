@@ -2,20 +2,33 @@
 - name: Validar sistema operacional suportado
   ansible.builtin.assert:
     that:
-      - ansible_facts.os_family == 'RedHat'
-      - ansible_facts.distribution in ['CentOS', 'Rocky', 'AlmaLinux']
-      - ansible_facts.distribution_major_version | int in [7, 8, 9]
+      - ansible_facts.os_family in ['RedHat', 'Debian']
       - >-
-        (ansible_facts.distribution_major_version | int != 7)
-        or (ansible_facts.distribution == 'CentOS')
+        (ansible_facts.os_family == 'RedHat'
+         and ansible_facts.distribution in ['CentOS', 'Rocky', 'AlmaLinux']
+         and ansible_facts.distribution_major_version | int in [7, 8, 9]
+         and ((ansible_facts.distribution_major_version | int != 7)
+              or ansible_facts.distribution == 'CentOS'))
+        or
+        (ansible_facts.os_family == 'Debian'
+         and ansible_facts.distribution in ['Debian', 'Ubuntu'])
     fail_msg: >-
-      Sistema nao suportado nesta fase.
-      Permitidos: CentOS 7, Rocky Linux 8/9 e AlmaLinux 8/9.
+      Sistema nao suportado.
+      Permitidos: CentOS 7, Rocky Linux 8/9, AlmaLinux 8/9,
+      Debian e Ubuntu.
 
 - name: Executar tarefas do CentOS 7
   ansible.builtin.include_tasks: el7.yml
-  when: ansible_facts.distribution_major_version | int == 7
+  when:
+    - ansible_facts.os_family == 'RedHat'
+    - ansible_facts.distribution_major_version | int == 7
 
 - name: Executar tarefas do Rocky ou AlmaLinux 8/9
   ansible.builtin.include_tasks: el8_el9.yml
-  when: ansible_facts.distribution_major_version | int in [8, 9]
+  when:
+    - ansible_facts.os_family == 'RedHat'
+    - ansible_facts.distribution_major_version | int in [8, 9]
+
+- name: Executar tarefas do Debian/Ubuntu
+  ansible.builtin.include_tasks: debian_ubuntu.yml
+  when: ansible_facts.os_family == 'Debian'

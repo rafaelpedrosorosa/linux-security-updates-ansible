@@ -1,20 +1,11 @@
 ---
-# ---------------------------------------------------------
-# 1. Consultar avisos de seguranca
-# ---------------------------------------------------------
+# CentOS 7: consultar sempre; aplicar somente com acao_atualizacao=atualizar.
 
-- name: Consultar avisos de seguranca no CentOS 7
+- name: Consultar advisories de seguranca no CentOS 7
   ansible.builtin.raw: yum updateinfo list security
   register: el7_security_advisories
   changed_when: false
-
-- name: Exibir avisos de seguranca
-  ansible.builtin.debug:
-    var: el7_security_advisories.stdout_lines
-
-# ---------------------------------------------------------
-# 2. Simular atualizacao
-# ---------------------------------------------------------
+  failed_when: el7_security_advisories.rc not in [0, 100]
 
 - name: Simular atualizacoes de seguranca no CentOS 7
   ansible.builtin.raw: yum update --security --assumeno
@@ -22,18 +13,25 @@
   changed_when: false
   failed_when: el7_security_preview.rc not in [0, 1]
 
-- name: Exibir pacotes candidatos a atualizacao
+- name: Exibir consulta de seguranca do CentOS 7
   ansible.builtin.debug:
     msg:
-      - "Host: {{ inventory_hostname }}"
+      - "Servidor: {{ inventory_hostname }}"
       - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
-      - "Operacao: {{ acao_atualizacao }}"
-      - "Pacotes candidatos:"
-      - "{{ el7_security_preview.stdout_lines }}"
+      - "Modo: {{ acao_atualizacao | upper }}"
+      - "Advisories encontrados:"
+      - "{{ el7_security_advisories.stdout_lines | default([]) }}"
+      - "Previa das atualizacoes:"
+      - "{{ el7_security_preview.stdout_lines | default([]) }}"
+      - "Nenhuma atualizacao foi aplicada nesta etapa."
 
-# ---------------------------------------------------------
-# 3. Aplicar atualizacoes somente quando autorizado
-# ---------------------------------------------------------
+- name: Encerrar modo de validacao no CentOS 7
+  ansible.builtin.debug:
+    msg:
+      - "Consulta concluida."
+      - "Nenhuma atualizacao foi aplicada."
+      - "Nenhuma reinicializacao foi executada."
+  when: acao_atualizacao == 'validar'
 
 - name: Aplicar atualizacoes de seguranca no CentOS 7
   ansible.builtin.raw: yum update --security -y
@@ -41,4 +39,21 @@
   changed_when: >-
     'No packages marked for update' not in
     (el7_security_update.stdout | default(''))
+  when: acao_atualizacao == 'atualizar'
+
+- name: Consultar advisories remanescentes no CentOS 7
+  ansible.builtin.raw: yum updateinfo list security
+  register: el7_security_remaining
+  changed_when: false
+  failed_when: el7_security_remaining.rc not in [0, 100]
+  when: acao_atualizacao == 'atualizar'
+
+- name: Exibir relatorio final do CentOS 7
+  ansible.builtin.debug:
+    msg:
+      - "Servidor: {{ inventory_hostname }}"
+      - "Atualizacao executada: SIM"
+      - "Reinicializacao automatica: DESABILITADA"
+      - "Advisories remanescentes:"
+      - "{{ el7_security_remaining.stdout_lines | default([]) }}"
   when: acao_atualizacao == 'atualizar'

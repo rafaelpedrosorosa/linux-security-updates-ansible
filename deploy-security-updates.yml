@@ -208,6 +208,11 @@
           register: kernel_default
           changed_when: false
 
+        - name: Garantir utilitario needs-restarting
+          ansible.builtin.dnf:
+            name: dnf-utils
+            state: present
+            
         - name: Verificar necessidade de reinicializacao
           ansible.builtin.command:
             argv:

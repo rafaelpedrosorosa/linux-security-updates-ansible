@@ -1,41 +1,47 @@
 ---
-# ---------------------------------------------------------
-# 1. Consultar avisos de seguranca
-# ---------------------------------------------------------
+# Rocky/AlmaLinux 8/9: consultar sempre; aplicar somente com acao_atualizacao=atualizar.
 
-- name: Consultar avisos de seguranca via DNF
+- name: Consultar advisories de seguranca via DNF
   ansible.builtin.command:
-    cmd: dnf updateinfo list security
+    argv:
+      - dnf
+      - updateinfo
+      - list
+      - security
   register: dnf_security_advisories
   changed_when: false
-
-- name: Exibir avisos de seguranca
-  ansible.builtin.debug:
-    var: dnf_security_advisories.stdout_lines
-
-# ---------------------------------------------------------
-# 2. Simular atualizacao
-# ---------------------------------------------------------
+  failed_when: dnf_security_advisories.rc not in [0, 100]
 
 - name: Simular atualizacoes de seguranca via DNF
   ansible.builtin.command:
-    cmd: dnf upgrade --security --assumeno
+    argv:
+      - dnf
+      - upgrade
+      - --security
+      - --assumeno
   register: dnf_security_preview
   changed_when: false
   failed_when: dnf_security_preview.rc not in [0, 1]
 
-- name: Exibir pacotes candidatos a atualizacao
+- name: Exibir consulta de seguranca via DNF
   ansible.builtin.debug:
     msg:
-      - "Host: {{ inventory_hostname }}"
+      - "Servidor: {{ inventory_hostname }}"
       - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
-      - "Operacao: {{ acao_atualizacao }}"
-      - "Pacotes candidatos:"
-      - "{{ dnf_security_preview.stdout_lines }}"
+      - "Modo: {{ acao_atualizacao | upper }}"
+      - "Advisories encontrados:"
+      - "{{ dnf_security_advisories.stdout_lines | default([]) }}"
+      - "Previa das atualizacoes:"
+      - "{{ dnf_security_preview.stdout_lines | default([]) }}"
+      - "Nenhuma atualizacao foi aplicada nesta etapa."
 
-# ---------------------------------------------------------
-# 3. Aplicar atualizacoes somente quando autorizado
-# ---------------------------------------------------------
+- name: Encerrar modo de validacao via DNF
+  ansible.builtin.debug:
+    msg:
+      - "Consulta concluida."
+      - "Nenhuma atualizacao foi aplicada."
+      - "Nenhuma reinicializacao foi executada."
+  when: acao_atualizacao == 'validar'
 
 - name: Aplicar atualizacoes de seguranca via DNF
   ansible.builtin.dnf:
@@ -44,6 +50,39 @@
     security: true
     update_only: true
     update_cache: true
-    use_backend: dnf4
+    lock_timeout: 300
   register: dnf_security_update
+  when: acao_atualizacao == 'atualizar'
+
+- name: Consultar advisories remanescentes via DNF
+  ansible.builtin.command:
+    argv:
+      - dnf
+      - updateinfo
+      - list
+      - security
+  register: dnf_security_remaining
+  changed_when: false
+  failed_when: dnf_security_remaining.rc not in [0, 100]
+  when: acao_atualizacao == 'atualizar'
+
+- name: Verificar necessidade de reboot via needs-restarting
+  ansible.builtin.command:
+    argv:
+      - needs-restarting
+      - -r
+  register: dnf_reboot_check
+  changed_when: false
+  failed_when: dnf_reboot_check.rc not in [0, 1]
+  when: acao_atualizacao == 'atualizar'
+
+- name: Exibir relatorio final via DNF
+  ansible.builtin.debug:
+    msg:
+      - "Servidor: {{ inventory_hostname }}"
+      - "Atualizacao executada: SIM"
+      - "Reboot necessario: {{ 'SIM' if dnf_reboot_check.rc | default(0) == 1 else 'NAO' }}"
+      - "Reboot automatico: DESABILITADO"
+      - "Advisories remanescentes:"
+      - "{{ dnf_security_remaining.stdout_lines | default([]) }}"
   when: acao_atualizacao == 'atualizar'

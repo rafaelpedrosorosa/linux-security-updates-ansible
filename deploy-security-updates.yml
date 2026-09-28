@@ -1,6 +1,5 @@
-
 ---
-- name: Validar ou aplicar atualizacoes de seguranca em sistemas RPM
+- name: Validar ou aplicar atualizacoes de seguranca em Linux
   hosts: "grp_linux:&{{ grupo_destino | default('grupo_nao_selecionado') }}"
   become: true
   become_method: sudo
@@ -12,20 +11,15 @@
       - grp_centos
       - grp_rocky
       - grp_almalinux
+      - grp_debian
+      - grp_ubuntu
       - grp_linux
 
     acoes_permitidas:
       - validar
       - atualizar
 
-    reboot_required: false
-
   pre_tasks:
-
-    # ---------------------------------------------------------
-    # 1. Validacao dos parametros recebidos pelo AWX Survey
-    # ---------------------------------------------------------
-
     - name: Validar parametros da execucao
       ansible.builtin.assert:
         that:
@@ -38,220 +32,16 @@
         success_msg: "Parametros validados com sucesso."
       run_once: true
 
-    # ---------------------------------------------------------
-    # 2. Validacao do sistema operacional
-    # ---------------------------------------------------------
-
-    - name: Validar familia e versao do sistema operacional
-      ansible.builtin.assert:
-        that:
-          - ansible_facts['os_family'] == 'RedHat'
-          - >-
-            (ansible_facts['distribution'] == 'CentOS'
-             and ansible_facts['distribution_major_version'] == '7')
-            or
-            (ansible_facts['distribution'] in ['Rocky', 'AlmaLinux']
-             and ansible_facts['distribution_major_version'] in ['8', '9'])
-        fail_msg: >-
-          Sistema operacional nao homologado para este playbook.
-          Suportados nesta etapa: CentOS 7, Rocky 8/9 e
-          AlmaLinux 8/9.
-
-    - name: Identificar gerenciador de pacotes
-      ansible.builtin.set_fact:
-        gerenciador_pacotes: >-
-          {{ 'yum' if ansible_facts['distribution_major_version'] == '7'
-             else 'dnf' }}
-
-    # ---------------------------------------------------------
-    # 3. Identificacao do ambiente
-    # ---------------------------------------------------------
-
     - name: Exibir identificacao do servidor
       ansible.builtin.debug:
         msg:
           - "Servidor: {{ inventory_hostname }}"
-          - "Sistema: {{ ansible_facts['distribution'] }}"
-          - "Versao: {{ ansible_facts['distribution_version'] }}"
-          - "Gerenciador: {{ gerenciador_pacotes }}"
+          - "Sistema: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          - "Familia: {{ ansible_facts.os_family }}"
           - "Grupo selecionado: {{ grupo_destino }}"
           - "Acao solicitada: {{ acao_atualizacao }}"
           - "Reboot automatico: DESABILITADO"
 
   tasks:
-
-    # =========================================================
-    # ETAPA 1 - CONSULTA DOS ADVISORIES DE SEGURANCA
-    # =========================================================
-
-    - name: Consultar advisories de seguranca disponiveis
-      ansible.builtin.command:
-        argv:
-          - "{{ gerenciador_pacotes }}"
-          - updateinfo
-          - list
-          - updates
-          - security
-      register: security_advisories
-      changed_when: false
-      failed_when: security_advisories.rc not in [0, 100]
-
-    - name: Exibir advisories encontrados
-      ansible.builtin.debug:
-        msg: >-
-          {{ security_advisories.stdout
-             | default('Nenhum advisory retornado.', true) }}
-
-    # =========================================================
-    # ETAPA 2 - PREVIA DAS ATUALIZACOES
-    # =========================================================
-
-    - name: Simular atualizacoes de seguranca
-      ansible.builtin.command:
-        argv:
-          - "{{ gerenciador_pacotes }}"
-          - update
-          - --security
-          - --assumeno
-      register: security_preview
-      changed_when: false
-      failed_when: security_preview.rc not in [0, 1]
-
-    - name: Exibir previa das atualizacoes
-      ansible.builtin.debug:
-        msg: "{{ security_preview.stdout_lines }}"
-
-    # =========================================================
-    # ETAPA 3 - VALIDACAO DA ACAO SOLICITADA
-    # =========================================================
-
-    - name: Encerrar modo de validacao
-      ansible.builtin.debug:
-        msg:
-          - "Servidor: {{ inventory_hostname }}"
-          - "Modo: VALIDAR"
-          - "Consulta de seguranca concluida."
-          - "Nenhuma atualizacao foi aplicada."
-          - "Nenhuma reinicializacao foi executada."
-      when: acao_atualizacao == 'validar'
-
-    # =========================================================
-    # ETAPA 4 - APLICACAO DAS ATUALIZACOES
-    # =========================================================
-
-    - name: Aplicar atualizacoes de seguranca
-      when: acao_atualizacao == 'atualizar'
-      block:
-
-        - name: Atualizar pacotes de seguranca - Rocky e AlmaLinux
-          ansible.builtin.dnf:
-            name: "*"
-            state: latest
-            security: true
-            update_only: true
-            lock_timeout: 300
-          register: security_update_dnf
-          when: gerenciador_pacotes == 'dnf'
-
-        - name: Atualizar pacotes de seguranca - CentOS 7
-          ansible.builtin.command:
-            argv:
-              - yum
-              - update
-              - --security
-              - -y
-          register: security_update_yum
-          changed_when: >-
-            'No packages marked for update'
-            not in security_update_yum.stdout
-          when: gerenciador_pacotes == 'yum'
-
-        # -----------------------------------------------------
-        # 5. Validacao apos a atualizacao
-        # -----------------------------------------------------
-
-        - name: Consultar advisories remanescentes
-          ansible.builtin.command:
-            argv:
-              - "{{ gerenciador_pacotes }}"
-              - updateinfo
-              - list
-              - updates
-              - security
-          register: security_remaining
-          changed_when: false
-          failed_when: security_remaining.rc not in [0, 100]
-
-        - name: Exibir resultado da consulta posterior
-          ansible.builtin.debug:
-            msg: >-
-              {{ security_remaining.stdout
-                 | default('Nenhum advisory remanescente.', true) }}
-
-        # -----------------------------------------------------
-        # 6. Verificacao da necessidade de reinicializacao
-        # -----------------------------------------------------
-
-        - name: Consultar kernel atualmente em execucao
-          ansible.builtin.command:
-            argv:
-              - uname
-              - -r
-          register: kernel_running
-          changed_when: false
-
-        - name: Consultar kernel configurado como padrao
-          ansible.builtin.command:
-            argv:
-              - grubby
-              - --default-kernel
-          register: kernel_default
-          changed_when: false
-
-        - name: Garantir utilitario needs-restarting
-          ansible.builtin.dnf:
-            name: dnf-utils
-            state: present
-            
-        - name: Verificar necessidade de reinicializacao
-          ansible.builtin.command:
-            argv:
-              - needs-restarting
-              - -r
-          register: reboot_check
-          changed_when: false
-          failed_when: reboot_check.rc not in [0, 1]
-
-        - name: Determinar necessidade de reinicializacao
-          ansible.builtin.set_fact:
-            reboot_required: >-
-              {{
-                reboot_check.rc == 1
-                or
-                kernel_running.stdout !=
-                (
-                  kernel_default.stdout
-                  | basename
-                  | regex_replace('^vmlinuz-', '')
-                )
-              }}
-
-        # -----------------------------------------------------
-        # 7. Relatorio final do servidor
-        # -----------------------------------------------------
-
-        - name: Exibir relatorio final
-          ansible.builtin.debug:
-            msg:
-              - "========================================"
-              - "RELATORIO DE ATUALIZACAO DE SEGURANCA"
-              - "========================================"
-              - "Servidor: {{ inventory_hostname }}"
-              - "Sistema: {{ ansible_facts['distribution'] }}"
-              - "Versao: {{ ansible_facts['distribution_version'] }}"
-              - "Acao executada: {{ acao_atualizacao }}"
-              - "Kernel em execucao: {{ kernel_running.stdout }}"
-              - "Kernel padrao: {{ kernel_default.stdout }}"
-              - "Reinicializacao necessaria: {{ 'SIM' if reboot_required | bool else 'NAO' }}"
-              - "Reinicializacao automatica: DESABILITADA"
-              - "========================================"
+    - name: Executar fluxo de atualizacoes por familia Linux
+      ansible.builtin.include_tasks: tasks/main.yml
